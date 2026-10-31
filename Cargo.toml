@@ -1,0 +1,26 @@
+[package]
+name = "markdonk"
+version = "0.1.0"
+edition = "2024"
+description = "A memory-efficient native Markdown viewer"
+license = "MIT"
+
+[dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+libc = "0.2.191"
+pulldown-cmark = { version = "0.13.6", default-features = false }
+softbuffer = { version = "0.4.8", default-features = false, features = ["wayland", "wayland-dlopen", "x11", "x11-dlopen"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Dependencies are built for size; the painting code in this crate stays at -O3.
+[profile.release.package."*"]
+opt-level = "s"
