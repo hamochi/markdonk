@@ -6,7 +6,7 @@ A memory-efficient native Markdown viewer and editor for Linux. It ships as one 
 its fonts inside, and draws everything itself on the CPU, with no webview or GPU
 context.
 
-![markdonk showing a rendered document with its table of contents](assets/screenshot.png)
+![markdonk scrolling a document and editing its blocks in place](assets/demo.webp)
 
 ```sh
 cargo build --release
