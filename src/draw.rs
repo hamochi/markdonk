@@ -230,6 +230,7 @@ impl View {
         }
         self.draw_search_bar(&mut c, &t);
         self.draw_status(&mut c, &t);
+        self.draw_edit_badge(&mut c, &t);
         self.needs_redraw = false;
     }
 
@@ -296,6 +297,12 @@ impl View {
                 let extend_top = if first { 0 } else { 2 * radius };
                 let extend_bot = if last { 0 } else { 2 * radius };
                 c.rrect(x, y - extend_top, cw_i, content_h + extend_top + extend_bot, radius, t.code_bg);
+                c.reset_clip();
+            }
+            Kind::Source => {
+                c.rrect(x, y, cw_i, content_h, radius, t.code_bg);
+                c.set_clip(x, y, x + cw_i, y + content_h);
+                c.rect(x, y, (3.0 * s).round() as i32, content_h, t.link);
                 c.reset_clip();
             }
             Kind::Rule => {
@@ -365,6 +372,15 @@ impl View {
             draw_part(c, &mut self.fonts, t, part, ox.round() as i32, oy.round() as i32, base, &tints, s);
         }
         c.reset_clip();
+        if let Some(edit) = &self.edit {
+            if edit.block == i && edit.blink_on {
+                if let (Some(part), Some((_, cx, top, line))) = (shaped.parts.first(), self.caret_layout()) {
+                    let px = (bx + part.x + cx).round() as i32;
+                    let py = (y as f32 + part.y + top).round() as i32;
+                    c.rect(px, py, (2.0 * s).round().max(1.0) as i32, line.round() as i32, t.link);
+                }
+            }
+        }
     }
 
     fn draw_marker(&mut self, c: &mut Canvas, t: &Theme, i: usize, x: i32, y: i32) {
@@ -511,6 +527,20 @@ impl View {
         }
         c.reset_clip();
         draw_plain(c, &mut self.fonts, &count_buf, x + w - pad - count_w, text_y, t.muted);
+    }
+
+    fn draw_edit_badge(&mut self, c: &mut Canvas, t: &Theme) {
+        let Some(edit) = &self.edit else { return };
+        let label = if edit.dirty() { "Editing · unsaved" } else { "Editing" };
+        let ws = self.win_scale();
+        let buf = plain_buffer(&mut self.fonts, label, 13.0 * ws, 20.0 * ws, false, false);
+        let pad = (10.0 * ws) as i32;
+        let w = crate::view::buffer_width(&buf) as i32 + 2 * pad;
+        let h = (30.0 * ws) as i32;
+        let x = self.w - w - (20.0 * ws) as i32;
+        let y = self.h - h - (12.0 * ws) as i32;
+        c.rrect(x, y, w, h, (6.0 * ws) as i32, t.pill_bg);
+        draw_plain(c, &mut self.fonts, &buf, x + pad, y + (5.0 * ws) as i32, t.pill_fg);
     }
 
     fn draw_status(&mut self, c: &mut Canvas, t: &Theme) {

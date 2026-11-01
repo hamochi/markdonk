@@ -45,6 +45,21 @@ xdg-mime default markdonk.desktop text/markdown text/x-markdown
 | `Ctrl+C`, `Ctrl+A` | Copy, select all | `Backspace` | Previous file |
 | `q` | Quit | `Esc` | Close search, clear selection |
 
+## Editing
+
+Press `e` to edit in place. The block under the caret shows raw Markdown, and the rest of
+the document stays rendered. Moving the caret to another block, or clicking one, renders
+the block you left.
+
+| Key | Action | Key | Action |
+| --- | --- | --- | --- |
+| `Ctrl+S` | Save | `Esc` | Finish editing |
+| `Ctrl+Z`, `Ctrl+Y` | Undo, redo | `Ctrl+Shift+Q` | Discard changes |
+| `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | Copy, cut, paste | `Ctrl+A` | Select the block |
+
+Saves replace the file atomically. A list or table is one block, so it opens whole. If the
+file changes on disk while you have unsaved edits, the next save warns before overwriting.
+
 ## Scrolling
 
 Touchpad scrolling is scaled up by 2.5 to undo Omarchy's `scroll_factor = 0.4`, so

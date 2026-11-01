@@ -42,6 +42,7 @@ and compositor effects that rely on a client's transparent pixels can't show thr
 | `src/main.rs` | CLI, `winit` event loop, key bindings, `softbuffer` surface, `--render-png` |
 | `src/doc.rs` | Markdown to a flat `Vec<Block>`, plus links, tables, TOC and anchors |
 | `src/view.rs` | Lazy layout, scrolling, hit testing, selection, search, navigation |
+| `src/view/edit.rs` | Inline editing: caret, undo, saving, disk conflicts |
 | `src/draw.rs` | Themes and painting a frame |
 | `src/canvas.rs` | Shape and blit primitives on the window's `0x00RRGGBB` buffer |
 | `src/fonts.rs` | Embedded fonts, lazy system fonts, bounded glyph cache |
@@ -67,6 +68,15 @@ and compositor effects that rely on a client's transparent pixels can't show thr
 - **System fonts:** scanned only when a document needs a character neither embedded font has.
   Text they already cover must not trigger the scan; a test checks this.
 - **Dependencies:** built with `opt-level = "s"`, while this crate stays at `-O3` for painting.
+
+## Editing
+
+- The block under the caret becomes one `Kind::Source` block showing raw Markdown (`doc::activate`).
+  Blocks record their top-level source range in `src`, so a list or table opens whole.
+- Keystrokes only reshape that block. The whole document is re-parsed when the caret leaves it.
+- The source text exists only in `View::edit`, so view mode holds no copy of it.
+- Never lose work: saves are atomic and follow symlinks, `Esc` won't leave with unsaved changes,
+  and a file changed on disk needs a second `Ctrl+S` to overwrite.
 
 ## Safety rules
 
@@ -113,6 +123,7 @@ In a 3840x2320 window, after the first version was built. Re-measure if a change
 
 - Clipboard copy, X11, and link clicks, drag selection and back navigation in a real window.
   Their logic has unit tests, but no one has confirmed them by hand.
+- In the editor: mouse placement, paste and cut, and typing dead keys such as `` ` `` and `~`.
 - Momentum settings (`FLING_FRICTION`, `TOUCHPAD_GAIN`) are tuned by judgement, not measured.
 
 ## Embedded fonts

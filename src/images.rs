@@ -81,6 +81,17 @@ impl Images {
         }
     }
 
+    /// Takes every decoded image out of the cache, to re-key after blocks move.
+    pub fn take_ready(&mut self) -> Vec<(u32, Pixels)> {
+        self.bytes = 0;
+        std::mem::take(&mut self.ready).into_iter().collect()
+    }
+
+    pub fn insert_ready(&mut self, block: u32, pixels: Pixels) {
+        self.bytes += pixels.data.len() * 4;
+        self.ready.insert(block, pixels);
+    }
+
     /// Collects finished decodes. Returns true when something changed.
     pub fn poll(&mut self) -> bool {
         let Some((_, rx)) = &self.worker else { return false };

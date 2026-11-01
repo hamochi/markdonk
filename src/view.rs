@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod edit;
+pub use edit::Edit;
+
 pub const MAX_CONTENT: f32 = 860.0;
 pub const SIDE_PAD: f32 = 32.0;
 pub const TOP_PAD: f32 = 32.0;
@@ -126,6 +129,8 @@ pub struct View {
     pointer: (f32, f32),
     dragging_scrollbar: bool,
     pub needs_redraw: bool,
+    pub edit: Option<Box<Edit>>,
+    quit_armed: Option<Instant>,
 }
 
 /// Packs a style and link index into cosmic-text's per-glyph metadata.
@@ -233,6 +238,7 @@ pub fn heading_size(level: u8) -> (f32, f32) {
 
 const BODY: (f32, f32) = (16.0, 26.5);
 const CODE_TEXT: (f32, f32) = (13.5, 21.0);
+const SOURCE_TEXT: (f32, f32) = (14.5, 23.0);
 pub const RULE_H_PX: f32 = 3.0;
 
 /// Logical gap above a block.
@@ -247,7 +253,7 @@ pub fn gap(blocks: &[doc::Block], i: usize) -> f32 {
         Kind::Heading(1 | 2) => 34.0,
         Kind::Heading(_) => 26.0,
         Kind::Rule => 26.0,
-        Kind::Code { .. } | Kind::Image { .. } | Kind::Row { .. } => 16.0,
+        Kind::Code { .. } | Kind::Image { .. } | Kind::Row { .. } | Kind::Source => 16.0,
         Kind::Para if b.tight => 5.0,
         Kind::Para if matches!(prev.kind, Kind::Heading(_)) => 10.0,
         Kind::Para if matches!(prev.kind, Kind::Rule) => 26.0,
@@ -314,6 +320,8 @@ impl View {
             pointer: (0.0, 0.0),
             dragging_scrollbar: false,
             needs_redraw: true,
+            edit: None,
+            quit_armed: None,
         }
     }
 
@@ -322,8 +330,9 @@ impl View {
     }
 
     pub fn title(&self) -> String {
+        let unsaved = if self.edit.as_ref().is_some_and(|e| e.dirty()) { "● " } else { "" };
         match self.path.as_ref().and_then(|p| p.file_name()) {
-            Some(name) => format!("{} — markdonk", name.to_string_lossy()),
+            Some(name) => format!("{unsaved}{} — markdonk", name.to_string_lossy()),
             None => "markdonk".to_string(),
         }
     }
@@ -342,10 +351,15 @@ impl View {
 
     /// When the event loop must wake on its own, for example to hide a message.
     pub fn next_wake(&self) -> Option<Instant> {
-        self.status.as_ref().and_then(|s| s.1)
+        let status = self.status.as_ref().and_then(|s| s.1);
+        match (status, self.blink_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn tick_timers(&mut self) {
+        self.tick_blink();
         if let Some((_, Some(at))) = &self.status {
             if Instant::now() >= *at {
                 self.status = None;
@@ -450,6 +464,10 @@ impl View {
             Kind::Rule => RULE_H_PX * s,
             Kind::Image { width: w, height: h, .. } => image_size((*w, *h), s, width).1 as f32,
             Kind::Row { .. } => (BODY.1 + 2.0 * CELL_PAD_Y) * s,
+            Kind::Source => {
+                let lines = b.text.bytes().filter(|&c| c == b'\n').count() as f32 + 1.0;
+                lines * SOURCE_TEXT.1 * s + 2.0 * CODE_PAD_Y * s
+            }
         };
         content + gap(&self.doc.blocks, i) * s
     }
@@ -570,6 +588,25 @@ impl View {
                 parts.push(Part { buf, x: CODE_PAD_X * s, y: top, base: 0, line_starts });
             }
             Kind::Rule => height = RULE_H_PX * s,
+            Kind::Source => {
+                let inner = width - 2.0 * CODE_PAD_X * s;
+                // A trailing newline gets no line of its own without something on it.
+                let padded = b.text.ends_with('\n').then(|| format!("{} ", b.text));
+                let (buf, line_starts) = rich_buffer(fonts, Rich {
+                    text: padded.as_deref().unwrap_or(&b.text),
+                    base: 0,
+                    spans: &[],
+                    size: SOURCE_TEXT.0 * s,
+                    line: SOURCE_TEXT.1 * s,
+                    mono: true,
+                    bold: false,
+                    width: Some(inner.max(20.0)),
+                    align: None,
+                });
+                let text_h = buffer_height(&buf).max(SOURCE_TEXT.1 * s);
+                height = text_h + 2.0 * CODE_PAD_Y * s;
+                parts.push(Part { buf, x: CODE_PAD_X * s, y: CODE_PAD_Y * s, base: 0, line_starts });
+            }
             Kind::Image { width: w, height: h, .. } => {
                 height = image_size((*w, *h), s, width).1 as f32;
                 if !b.text.is_empty() {
@@ -805,6 +842,7 @@ impl View {
             self.scroll = self.target;
             let (x, y) = self.pointer;
             if let Some(pos) = self.hit(x, y.clamp(0.0, self.h as f32 - 1.0)).map(|h| h.pos) {
+                let pos = self.edit_clamp_drag(pos);
                 if let Some(sel) = &mut self.sel {
                     sel.1 = pos;
                 }
@@ -1061,9 +1099,10 @@ impl View {
         }
         if self.selecting {
             if let Some(hit) = self.hit(x, y) {
+                let pos = self.edit_clamp_drag(hit.pos);
                 if let Some(sel) = &mut self.sel {
-                    if sel.1 != hit.pos {
-                        sel.1 = hit.pos;
+                    if sel.1 != pos {
+                        sel.1 = pos;
                         self.needs_redraw = true;
                     }
                 }
@@ -1127,6 +1166,10 @@ impl View {
         };
         self.last_click = Some((now, x, y, clicks));
         let Some(hit) = self.hit(x, y) else { return };
+        if self.editing() {
+            self.edit_click(&hit, clicks, y);
+            return;
+        }
         self.press = Some(Press { x, y, link: hit.link });
         match clicks {
             2 => {
@@ -1351,6 +1394,10 @@ impl View {
     }
 
     pub fn go_back(&mut self) {
+        if self.editing() {
+            self.set_status("Finish editing first");
+            return;
+        }
         let Some(entry) = self.history.pop() else {
             self.set_status("Nothing to go back to");
             return;
@@ -1373,6 +1420,10 @@ impl View {
 
     /// Re-reads the file, staying at the same place in the document.
     pub fn reload(&mut self) {
+        if self.editing() {
+            self.edit_disk_changed();
+            return;
+        }
         let Some(path) = self.path.clone() else { return };
         match load_file(&path) {
             Ok(doc) => {

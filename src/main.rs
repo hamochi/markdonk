@@ -44,6 +44,7 @@ Keys:
   Ctrl + - 0      Zoom                r            Reload
   Ctrl+C Ctrl+A   Copy, select all    Backspace    Back to previous file
   q               Quit                Esc          Close search, clear selection
+  e               Edit in place: Ctrl+S saves, Esc finishes, Ctrl+Z undoes
 ";
 
 const LICENSES: &str = concat!(
@@ -134,6 +135,11 @@ impl App {
             return;
         }
 
+        if v.editing() {
+            self.edit_key(event, event_loop);
+            return;
+        }
+
         match key {
             Key::Character(c) if ctrl => match c.to_ascii_lowercase().as_str() {
                 "c" => v.copy(),
@@ -146,6 +152,7 @@ impl App {
                 _ => {}
             },
             Key::Character("q") => event_loop.exit(),
+            Key::Character("e") => v.enter_edit(),
             Key::Character("j") => v.scroll_lines(1.0),
             Key::Character("k") => v.scroll_lines(-1.0),
             Key::Character("d") => v.scroll_pages(0.5),
@@ -176,6 +183,60 @@ impl App {
                     v.close_search();
                 } else {
                     v.clear_selection();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn edit_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        let ctrl = self.mods.control_key();
+        let shift = self.mods.shift_key();
+        let v = &mut self.view;
+        match event.logical_key.as_ref() {
+            Key::Character(c) if ctrl => match c.to_ascii_lowercase().as_str() {
+                "s" => v.edit_save(),
+                "z" if shift => v.edit_redo(),
+                "z" => v.edit_undo(),
+                "y" => v.edit_redo(),
+                "c" => v.copy(),
+                "x" => v.edit_cut(),
+                "v" => v.edit_paste(),
+                "a" => v.edit_select_block(),
+                "f" => v.open_search(),
+                "q" if shift => v.edit_discard(),
+                "q" | "w" => {
+                    if v.request_quit() {
+                        event_loop.exit();
+                    }
+                }
+                "=" | "+" => v.zoom_by(1.1),
+                "-" | "_" => v.zoom_by(1.0 / 1.1),
+                "0" => v.zoom_reset(),
+                _ => {}
+            },
+            Key::Named(NamedKey::Escape) => {
+                if v.search.is_some() {
+                    v.close_search();
+                } else {
+                    v.edit_escape();
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) => v.caret_left(ctrl, shift),
+            Key::Named(NamedKey::ArrowRight) => v.caret_right(ctrl, shift),
+            Key::Named(NamedKey::ArrowUp) => v.caret_vertical(false, shift),
+            Key::Named(NamedKey::ArrowDown) => v.caret_vertical(true, shift),
+            Key::Named(NamedKey::Home) => v.caret_line_edge(false, shift),
+            Key::Named(NamedKey::End) => v.caret_line_edge(true, shift),
+            Key::Named(NamedKey::PageDown) => v.scroll_pages(1.0),
+            Key::Named(NamedKey::PageUp) => v.scroll_pages(-1.0),
+            Key::Named(NamedKey::Backspace) => v.edit_backspace(ctrl),
+            Key::Named(NamedKey::Delete) => v.edit_delete(ctrl),
+            Key::Named(NamedKey::Enter) => v.edit_insert("\n"),
+            Key::Named(NamedKey::Tab) => v.edit_insert("    "),
+            _ if !ctrl => {
+                if let Some(text) = event.text.as_ref().filter(|t| !t.chars().any(char::is_control)) {
+                    v.edit_insert(text);
                 }
             }
             _ => {}
@@ -238,7 +299,11 @@ impl ApplicationHandler<Wake> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.view.request_quit() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(win) = &self.win {
                     let scale = win.window.scale_factor() as f32;

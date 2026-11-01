@@ -35,6 +35,8 @@ pub enum Kind {
     Rule,
     Image { path: Box<Path>, width: u32, height: u32 },
     Row { table: u32, row: u32, cells: Box<[(u32, u32)]> },
+    /// Raw Markdown of the block being edited.
+    Source,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,6 +58,8 @@ pub struct Block {
     pub quotes: u16,
     pub marker: Marker,
     pub tight: bool,
+    /// Byte range of the top-level Markdown element this block came from.
+    pub src: (u32, u32),
 }
 
 pub struct Table {
@@ -121,6 +125,7 @@ struct Builder<'a> {
     html_skip: HtmlSkip,
     /// The next block opens an outermost list, so it isn't tight to what's above.
     list_opening: bool,
+    src: (u32, u32),
 }
 
 pub fn parse(src: &str, base: Option<&Path>) -> Doc {
@@ -151,8 +156,25 @@ pub fn parse(src: &str, base: Option<&Path>) -> Doc {
         slugs: HashMap::new(),
         html_skip: HtmlSkip::None,
         list_opening: false,
+        src: (0, 0),
     };
-    for event in Parser::new_ext(src, options) {
+    let mut depth = 0u32;
+    for (event, range) in Parser::new_ext(src, options).into_offset_iter() {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    b.flush();
+                    b.src = (range.start as u32, range.end as u32);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ if depth == 0 => {
+                b.flush();
+                b.src = (range.start as u32, range.end as u32);
+            }
+            _ => {}
+        }
         b.event(event);
     }
     b.flush();
@@ -523,6 +545,7 @@ impl Builder<'_> {
             quotes,
             marker: std::mem::replace(&mut self.marker, Marker::None),
             tight,
+            src: self.src,
         });
     }
 
@@ -609,6 +632,37 @@ fn is_block_tag(name: &str) -> bool {
         "th", "thead", "tr", "ul",
     ];
     TAGS.iter().any(|t| name.eq_ignore_ascii_case(t))
+}
+
+/// Replaces the blocks of the source range `range` with one raw block, and
+/// returns its index.
+pub fn activate(doc: &mut Doc, range: (u32, u32), text: &str) -> usize {
+    let lo = doc.blocks.partition_point(|b| b.src.1 <= range.0);
+    let hi = lo + doc.blocks[lo..].partition_point(|b| b.src.0 < range.1);
+    doc.blocks.splice(lo..hi, [Block {
+        kind: Kind::Source,
+        text: text.into(),
+        spans: Box::new([]),
+        level: 0,
+        quotes: 0,
+        marker: Marker::None,
+        tight: false,
+        src: range,
+    }]);
+    let (lo32, hi32) = (lo as u32, hi as u32);
+    let shift = |i: u32| if i >= hi32 { i + lo32 + 1 - hi32 } else { i };
+    for table in &mut doc.tables {
+        table.first = shift(table.first);
+    }
+    doc.toc.retain(|e| e.block < lo32 || e.block >= hi32);
+    for entry in &mut doc.toc {
+        entry.block = shift(entry.block);
+    }
+    doc.anchors.retain(|_, b| *b < lo32 || *b >= hi32);
+    for block in doc.anchors.values_mut() {
+        *block = shift(*block);
+    }
+    lo
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -843,6 +897,48 @@ mod tests {
         let d = doc("> [!WARNING]\n> careful\n");
         assert_eq!(&*d.blocks[0].text, "Warning");
         assert_eq!(d.blocks[0].spans[0].style, BOLD | ALERT);
+    }
+
+    #[test]
+    fn blocks_record_their_top_level_source_range() {
+        let src = "# A\n\n- x\n- y\n\nz\n";
+        let d = doc(src);
+        let slice = |b: &Block| &src[b.src.0 as usize..b.src.1 as usize];
+        assert_eq!(slice(&d.blocks[0]), "# A\n");
+        assert_eq!(slice(&d.blocks[1]).trim_end(), "- x\n- y");
+        assert_eq!(d.blocks[1].src, d.blocks[2].src);
+        assert_eq!(slice(&d.blocks[3]).trim_end(), "z");
+    }
+
+    #[test]
+    fn activate_swaps_blocks_and_shifts_indexes() {
+        let src = "# A\n\n- x\n- y\n\n# B\n\n| t |\n|---|\n| 1 |\n";
+        let mut d = doc(src);
+        let range = d.blocks[1].src;
+        let i = activate(&mut d, range, "- x\n- y");
+        assert_eq!(i, 1);
+        assert_eq!(d.blocks[1].kind, Kind::Source);
+        assert_eq!(d.blocks[2].kind, Kind::Heading(1));
+        assert_eq!(d.toc[1].block, 2);
+        assert_eq!(d.anchors["b"], 2);
+        assert_eq!(d.tables[0].first, 3);
+        assert!(matches!(d.blocks[3].kind, Kind::Row { .. }));
+
+        let mut d = doc(src);
+        let range = d.blocks[0].src;
+        activate(&mut d, range, "# A");
+        assert_eq!(d.toc.len(), 1);
+        assert!(!d.anchors.contains_key("a"));
+    }
+
+    #[test]
+    fn activate_inserts_an_empty_block_in_a_gap() {
+        let src = "a\n\n\n\nb\n";
+        let mut d = doc(src);
+        let i = activate(&mut d, (3, 3), "");
+        assert_eq!(i, 1);
+        assert_eq!(d.blocks.len(), 3);
+        assert_eq!(&*d.blocks[2].text, "b");
     }
 
     #[test]
