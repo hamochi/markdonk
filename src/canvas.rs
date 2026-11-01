@@ -6,20 +6,34 @@ pub struct Canvas<'a> {
     pub w: i32,
     pub h: i32,
     clip: (i32, i32, i32, i32),
+    fill_alpha: u32,
 }
 
+const OPAQUE: u32 = 0xff00_0000;
+
+/// Premultiplies an 0xRRGGBB colour by `alpha`.
+fn premultiply(color: u32, alpha: u32) -> u32 {
+    if alpha >= 255 {
+        return color | OPAQUE;
+    }
+    let channel = |shift: u32| ((((color >> shift) & 0xff) * alpha + 127) / 255) << shift;
+    alpha << 24 | channel(16) | channel(8) | channel(0)
+}
+
+/// Composites an opaque 0xRRGGBB colour at `alpha` over a premultiplied pixel.
 #[inline]
 pub fn blend(dst: u32, src: u32, alpha: u32) -> u32 {
     let a = alpha + (alpha >> 7);
     let ia = 256 - a;
+    let src = src | OPAQUE;
     let rb = ((src & 0xff00ff) * a + (dst & 0xff00ff) * ia) >> 8;
-    let g = ((src & 0x00ff00) * a + (dst & 0x00ff00) * ia) >> 8;
-    (rb & 0xff00ff) | (g & 0x00ff00)
+    let ag = (((src >> 8) & 0xff00ff) * a + ((dst >> 8) & 0xff00ff) * ia) & 0xff00ff00;
+    (rb & 0xff00ff) | ag
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(px: &'a mut [u32], w: i32, h: i32) -> Self {
-        Canvas { px, w, h, clip: (0, 0, w, h) }
+        Canvas { px, w, h, clip: (0, 0, w, h), fill_alpha: 255 }
     }
 
     pub fn set_clip(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
@@ -30,11 +44,18 @@ impl<'a> Canvas<'a> {
         self.clip = (0, 0, self.w, self.h);
     }
 
-    pub fn clear(&mut self, color: u32) {
-        self.px.fill(color);
+    pub fn clear(&mut self, color: u32, alpha: u32) {
+        self.px.fill(premultiply(color, alpha));
+    }
+
+    /// Sets the alpha of `rect` and `rrect` fills, for panels that should stay
+    /// as see-through as the window background.
+    pub fn set_fill_alpha(&mut self, alpha: u32) {
+        self.fill_alpha = alpha;
     }
 
     pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        let color = premultiply(color, self.fill_alpha);
         let (cx0, cy0, cx1, cy1) = self.clip;
         let (x0, x1) = (x.max(cx0), x.saturating_add(w).min(cx1));
         let (y0, y1) = (y.max(cy0), y.saturating_add(h).min(cy1));
@@ -67,7 +88,7 @@ impl<'a> Canvas<'a> {
         let (cx0, cy0, cx1, cy1) = self.clip;
         if x >= cx0 && x < cx1 && y >= cy0 && y < cy1 {
             let p = &mut self.px[(y * self.w + x) as usize];
-            *p = if alpha >= 255 { color } else { blend(*p, color, alpha) };
+            *p = if alpha >= 255 { color | OPAQUE } else { blend(*p, color, alpha) };
         }
     }
 
@@ -87,7 +108,7 @@ impl<'a> Canvas<'a> {
                 let d = ((rf - dx as f32 - 0.5).powi(2) + (rf - dy as f32 - 0.5).powi(2)).sqrt();
                 let coverage = (rf - d + 0.5).clamp(0.0, 1.0);
                 if coverage > 0.0 {
-                    let a = (coverage * 255.0) as u32;
+                    let a = (coverage * 255.0) as u32 * self.fill_alpha / 255;
                     self.put(x + dx, y + dy, color, a);
                     self.put(x + w - 1 - dx, y + dy, color, a);
                     self.put(x + dx, y + h - 1 - dy, color, a);
@@ -176,7 +197,7 @@ impl<'a> Canvas<'a> {
                 let s = data[src + (col - x) as usize];
                 let a = s >> 24;
                 let p = &mut self.px[dst + col as usize];
-                *p = if a == 255 { s & 0xffffff } else { blend(*p, s & 0xffffff, a) };
+                *p = if a == 255 { s } else { blend(*p, s & 0xffffff, a) };
             }
         }
     }
@@ -189,7 +210,31 @@ mod tests {
     #[test]
     fn blend_endpoints_are_exact() {
         assert_eq!(blend(0x123456, 0xabcdef, 0), 0x123456);
-        assert_eq!(blend(0x123456, 0xabcdef, 255), 0xabcdef);
+        assert_eq!(blend(0x123456, 0xabcdef, 255), 0xffabcdef);
+    }
+
+    #[test]
+    fn text_over_a_see_through_background_gains_alpha() {
+        let bg = premultiply(0x202020, 128);
+        assert_eq!(bg >> 24, 128);
+        assert_eq!((bg >> 16) & 0xff, 0x10);
+        assert_eq!(blend(bg, 0xffffff, 255), 0xffffffff);
+        let edge = blend(bg, 0xffffff, 128);
+        assert!(edge >> 24 > 128 && edge >> 24 < 255);
+        // Premultiplied colour channels never exceed alpha.
+        assert!((edge >> 16) & 0xff <= edge >> 24);
+    }
+
+    #[test]
+    fn panels_can_stay_see_through() {
+        let mut px = vec![0u32; 4];
+        let mut c = Canvas::new(&mut px, 2, 2);
+        c.set_fill_alpha(128);
+        c.rect(0, 0, 1, 1, 0x000000);
+        c.set_fill_alpha(255);
+        c.rect(1, 1, 1, 1, 0x000000);
+        assert_eq!(px[0] >> 24, 128);
+        assert_eq!(px[3] >> 24, 255);
     }
 
     #[test]
@@ -205,7 +250,7 @@ mod tests {
         c.argb(9, 9, 2, 2, &[0xff000000; 4]);
         c.set_clip(2, 2, 4, 4);
         c.rect(0, 0, 10, 10, 9);
-        assert_eq!(px[22], 9);
-        assert_ne!(px[11], 9);
+        assert_eq!(px[22], 0xff000009);
+        assert_ne!(px[11], 0xff000009);
     }
 }

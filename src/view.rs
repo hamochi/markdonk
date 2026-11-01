@@ -3,9 +3,11 @@
 //! estimates, corrected without visible jumps as they come into range.
 
 use crate::doc::{self, BOLD, CODE, Doc, ITALIC, Kind, LINK, NO_LINK, Span, TOKEN_SHIFT};
-use crate::fonts::{Fonts, MONO, SANS};
+use crate::fonts::{Fonts, SANS};
 use crate::highlight;
 use crate::images::Images;
+use crate::pages;
+use crate::theme::{self, Theme};
 use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight, Wrap};
 use pulldown_cmark::Alignment;
 use std::collections::HashMap;
@@ -29,9 +31,6 @@ pub const SIDEBAR: f32 = 280.0;
 pub const TOC_ROW: f32 = 30.0;
 pub const SCROLLBAR_HIT: f32 = 16.0;
 const SCROLL_STEP: f64 = 100.0;
-/// Undoes the compositor's touchpad scaling (Omarchy ships scroll_factor = 0.4)
-/// so content tracks the finger. `--scroll-speed` adjusts it for other setups.
-const TOUCHPAD_GAIN: f64 = 2.5;
 const FLING_FRICTION: f64 = 3.2;
 const FLING_MIN_SPEED: f64 = 40.0;
 const FLING_MAX_AGE: Duration = Duration::from_millis(80);
@@ -69,6 +68,7 @@ pub struct Search {
 struct History {
     path: Option<PathBuf>,
     kept: Option<Doc>,
+    page: bool,
     block: usize,
     offset: f64,
 }
@@ -77,6 +77,14 @@ struct Press {
     x: f32,
     y: f32,
     link: Option<u32>,
+}
+
+/// Which colours to use. `Follow` tracks the Omarchy theme where there is one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Appearance {
+    Follow,
+    Dark,
+    Light,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -97,6 +105,15 @@ pub struct View {
     zoom: f32,
     pub s: f32,
     pub dark: bool,
+    pub theme: Theme,
+    appearance: Appearance,
+    /// Alpha of the window background; 255 is opaque.
+    pub background_alpha: u32,
+    /// Showing a built-in page, whose links may browse folders.
+    page: bool,
+    /// Keyboard focus on a link: block index and span index.
+    link_focus: Option<(u32, u32)>,
+    browse_dir: Option<PathBuf>,
     pub heights: Vec<f32>,
     pub ys: Vec<f64>,
     ys_dirty: bool,
@@ -149,8 +166,8 @@ pub fn meta_link(meta: usize) -> Option<u32> {
     }
 }
 
-fn attrs(style: u16, mono: bool, force_bold: bool) -> Attrs<'static> {
-    let family = if mono || style & CODE != 0 { MONO } else { SANS };
+fn attrs(style: u16, mono: bool, force_bold: bool, mono_family: &'static str) -> Attrs<'static> {
+    let family = if mono || style & CODE != 0 { mono_family } else { SANS };
     let mut a = Attrs::new().family(Family::Name(family));
     if force_bold || style & BOLD != 0 {
         a = a.weight(Weight::BOLD);
@@ -176,7 +193,8 @@ struct Rich<'a> {
 fn rich_buffer(fonts: &mut Fonts, r: Rich) -> (Buffer, Box<[u32]>) {
     fonts.ensure_coverage(r.text);
     let metrics = Metrics::new(r.size, r.line);
-    let default = attrs(0, r.mono, r.bold).metadata(pack_meta(0, NO_LINK));
+    let family = fonts.mono;
+    let default = attrs(0, r.mono, r.bold, family).metadata(pack_meta(0, NO_LINK));
     let mut pieces: Vec<(&str, Attrs)> = Vec::with_capacity(r.spans.len() * 2 + 1);
     let mut pos = 0;
     for span in r.spans {
@@ -186,7 +204,7 @@ fn rich_buffer(fonts: &mut Fonts, r: Rich) -> (Buffer, Box<[u32]>) {
             pieces.push((&r.text[pos..start], default.clone()));
         }
         if end > start {
-            let mut a = attrs(span.style, r.mono, r.bold).metadata(pack_meta(span.style, span.link));
+            let mut a = attrs(span.style, r.mono, r.bold, family).metadata(pack_meta(span.style, span.link));
             if span.style & CODE != 0 && !r.mono {
                 a = a.metrics(Metrics::new(r.size * 0.875, r.line));
             }
@@ -289,6 +307,12 @@ impl View {
             zoom: 1.0,
             s: 1.0,
             dark,
+            theme: if dark { theme::DARK } else { theme::LIGHT },
+            appearance: if dark { Appearance::Dark } else { Appearance::Light },
+            background_alpha: 255,
+            page: false,
+            link_focus: None,
+            browse_dir: None,
             heights: Vec::new(),
             ys: Vec::new(),
             ys_dirty: true,
@@ -902,7 +926,7 @@ impl View {
             self.toc_scroll = (self.toc_scroll + delta).clamp(0.0, max);
             self.needs_redraw = true;
         } else if is_pixels {
-            let dy = dy * TOUCHPAD_GAIN * self.scroll_speed;
+            let dy = dy * self.scroll_speed;
             self.track_touch(dy);
             self.scroll_pixels(dy);
         } else {
@@ -986,9 +1010,43 @@ impl View {
 
     // ----- appearance -----
 
-    pub fn toggle_theme(&mut self) {
-        self.dark = !self.dark;
+    /// Applies an appearance. Without an Omarchy theme, `Follow` means dark.
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        self.appearance = appearance;
+        self.theme = match appearance {
+            Appearance::Dark => theme::DARK,
+            Appearance::Light => theme::LIGHT,
+            Appearance::Follow => theme::load_omarchy().unwrap_or(if self.dark { theme::DARK } else { theme::LIGHT }),
+        };
         self.needs_redraw = true;
+    }
+
+    /// The Omarchy theme changed, or the desktop's light or dark preference did.
+    pub fn theme_changed(&mut self) {
+        if self.appearance == Appearance::Follow {
+            self.set_appearance(Appearance::Follow);
+        }
+    }
+
+    /// `m`: system theme, then dark, then light.
+    pub fn toggle_theme(&mut self) {
+        let next = match self.appearance {
+            Appearance::Follow => Appearance::Dark,
+            Appearance::Dark => Appearance::Light,
+            Appearance::Light => Appearance::Follow,
+        };
+        self.set_appearance(next);
+        self.set_status(match next {
+            Appearance::Follow => "Theme: system",
+            Appearance::Dark => "Theme: dark",
+            Appearance::Light => "Theme: light",
+        });
+    }
+
+    pub fn set_mono_font(&mut self, family: &str) {
+        if self.fonts.set_mono(family) {
+            self.relayout(true);
+        }
     }
 
     pub fn toggle_toc(&mut self) {
@@ -1352,6 +1410,10 @@ impl View {
     }
 
     pub fn open_link(&mut self, url: &str) {
+        if let Some(dir) = url.strip_prefix(pages::BROWSE).filter(|_| self.page) {
+            self.show_browser(doc::resolve(None, dir));
+            return;
+        }
         if let Some(fragment) = url.strip_prefix('#') {
             self.jump_to_anchor(fragment);
             return;
@@ -1372,25 +1434,121 @@ impl View {
         };
         let base = self.base_dir();
         let path = doc::resolve(base.as_deref(), file);
-        if !is_markdown(&path) {
+        if !pages::is_markdown(&path) {
             self.set_status(format!("Not opening non-Markdown file: {file}"));
             return;
         }
         match load_file(&path) {
             Ok(new_doc) => {
-                let (block, offset) = self.position();
-                let path_old = self.path.take();
-                let doc_old = std::mem::replace(&mut self.doc, new_doc);
-                let kept = if path_old.is_none() { Some(doc_old) } else { None };
-                self.history.push(History { path: path_old, kept, block, offset });
-                self.path = Some(path);
-                self.doc_changed(0, 0.0);
+                pages::remember(&path);
+                self.push_document(new_doc, Some(path), false);
                 if let Some(fragment) = fragment {
                     self.jump_to_anchor(fragment);
                 }
             }
             Err(err) => self.set_status(format!("Cannot open {file}: {err}")),
         }
+    }
+
+    /// Moves to a new document, keeping the current one reachable with `go_back`.
+    fn push_document(&mut self, new_doc: Doc, path: Option<PathBuf>, page: bool) {
+        let (block, offset) = self.position();
+        let path_old = self.path.take();
+        let doc_old = std::mem::replace(&mut self.doc, new_doc);
+        let kept = if path_old.is_none() { Some(doc_old) } else { None };
+        self.history.push(History { path: path_old, kept, page: self.page, block, offset });
+        self.path = path;
+        self.page = page;
+        self.doc_changed(0, 0.0);
+    }
+
+    /// Shows the start page in place of an empty document.
+    pub fn show_start_page(&mut self) {
+        self.doc = doc::parse(&pages::start_page(), None);
+        self.path = None;
+        self.page = true;
+        self.heights.clear();
+    }
+
+    /// `o`: browses from the current file's folder.
+    pub fn open_browser(&mut self) {
+        if self.editing() {
+            self.set_status("Finish editing first");
+            return;
+        }
+        let dir = self.base_dir().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("/"));
+        self.show_browser(dir);
+    }
+
+    fn show_browser(&mut self, dir: PathBuf) {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let new_doc = doc::parse(&pages::browse_page(&dir), None);
+        self.push_document(new_doc, None, true);
+        self.browse_dir = Some(dir);
+    }
+
+    /// `Tab`: moves keyboard focus to the next or previous link.
+    pub fn focus_next_link(&mut self, forward: bool) {
+        let n = self.doc.blocks.len();
+        if n == 0 {
+            return;
+        }
+        let links = |b: &doc::Block| -> Vec<u32> {
+            b.spans.iter().enumerate().filter(|(_, s)| s.style & LINK != 0).map(|(i, _)| i as u32).collect()
+        };
+        let (start_block, after) = match self.link_focus {
+            Some((block, span)) => (block as usize, Some(span)),
+            None => (self.block_at(self.scroll), None),
+        };
+        for step in 0..=n {
+            let i = if forward { (start_block + step) % n } else { (start_block + n - step % n) % n };
+            let spans = links(&self.doc.blocks[i]);
+            let found = if step == 0 {
+                match (after, forward) {
+                    (Some(a), true) => spans.iter().copied().find(|s| *s > a),
+                    (Some(a), false) => spans.iter().rev().copied().find(|s| *s < a),
+                    (None, true) => spans.first().copied(),
+                    (None, false) => spans.last().copied(),
+                }
+            } else if forward {
+                spans.first().copied()
+            } else {
+                spans.last().copied()
+            };
+            if let Some(span) = found {
+                self.link_focus = Some((i as u32, span));
+                let start = self.doc.blocks[i].spans[span as usize].start;
+                self.reveal(i, start);
+                self.hover_link = Some(self.doc.blocks[i].spans[span as usize].link);
+                self.needs_redraw = true;
+                return;
+            }
+        }
+    }
+
+    /// `Enter`: follows the focused link.
+    pub fn activate_focused_link(&mut self) {
+        let Some((block, span)) = self.link_focus else { return };
+        let link = self.doc.blocks.get(block as usize).and_then(|b| b.spans.get(span as usize)).map(|s| s.link);
+        if let Some(link) = link {
+            self.follow_link(link);
+        }
+    }
+
+    pub fn clear_link_focus(&mut self) {
+        if self.link_focus.take().is_some() {
+            self.hover_link = None;
+            self.needs_redraw = true;
+        }
+    }
+
+    pub fn focused_link_range(&self, block: u32) -> Option<(u32, u32)> {
+        let (b, span) = self.link_focus?;
+        if b != block {
+            return None;
+        }
+        let s = self.doc.blocks.get(b as usize)?.spans.get(span as usize)?;
+        Some((s.start, s.end))
     }
 
     pub fn go_back(&mut self) {
@@ -1415,6 +1573,7 @@ impl View {
         };
         self.doc = new_doc;
         self.path = entry.path;
+        self.page = entry.page;
         self.doc_changed(entry.block, entry.offset);
     }
 
@@ -1441,6 +1600,8 @@ impl View {
     }
 
     fn doc_changed(&mut self, block: usize, ratio: f64) {
+        self.link_focus = None;
+        self.browse_dir = None;
         self.images.reset();
         self.sel = None;
         self.selecting = false;
@@ -1471,6 +1632,9 @@ impl View {
     }
 
     fn base_dir(&self) -> Option<PathBuf> {
+        if self.browse_dir.is_some() {
+            return self.browse_dir.clone();
+        }
         match &self.path {
             Some(p) => p.parent().map(Path::to_path_buf),
             None => std::env::current_dir().ok(),
@@ -1488,12 +1652,6 @@ pub fn load_file(path: &Path) -> std::io::Result<Doc> {
     let bytes = std::fs::read(path)?;
     let src = String::from_utf8_lossy(&bytes);
     Ok(doc::parse(&src, path.parent()))
-}
-
-fn is_markdown(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        ["md", "markdown", "mdown", "mkd", "mdx", "txt"].iter().any(|m| m.eq_ignore_ascii_case(e))
-    })
 }
 
 fn has_scheme(url: &str) -> bool {
@@ -1665,7 +1823,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(4));
         }
         let lifted = v.scroll;
-        assert_eq!(lifted, 250.0, "gain applies to touchpad deltas");
+        assert_eq!(lifted, 100.0, "touchpad deltas pass through unscaled");
         v.touch_ended();
         assert!(v.animating());
         for _ in 0..200 {
@@ -1698,6 +1856,91 @@ mod tests {
         v.fling = 1000.0;
         v.pointer_down(500.0, 100.0);
         assert_eq!(v.fling, 0.0);
+    }
+
+    #[test]
+    fn browse_links_only_work_on_built_in_pages() {
+        let mut v = view("x");
+        let url = format!("{}/tmp", pages::BROWSE);
+        v.open_link(&url);
+        assert!(v.status_text().unwrap().starts_with("Not opening"), "documents can't drive the browser");
+        assert_eq!(&*v.doc.blocks[0].text, "x");
+    }
+
+    #[test]
+    fn browser_navigates_folders_and_goes_back() {
+        let dir = std::env::temp_dir().join(format!("markdonk-pages-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.md"), "# File A\n").unwrap();
+        let file = dir.join("a.md");
+        let mut v = View::new(load_file(&file).unwrap(), Some(file.clone()), true, Arc::new(|| {}));
+        v.resize(800, 600, 1.0);
+        v.prepare();
+        v.open_browser();
+        v.prepare();
+        assert_eq!(&*v.doc.blocks[0].text, "Open a file");
+        assert!(v.path.is_none());
+        v.focus_next_link(true);
+        v.focus_next_link(true);
+        v.activate_focused_link();
+        v.prepare();
+        assert!(v.path.is_none());
+        assert!(v.doc.blocks.iter().any(|b| b.text.contains("No folders") || b.text.contains("..")));
+        v.go_back();
+        v.go_back();
+        v.prepare();
+        assert_eq!(v.path.as_deref(), Some(file.as_path()));
+        assert_eq!(&*v.doc.blocks[0].text, "File A");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tab_cycles_links_both_ways_and_wraps() {
+        let mut v = view("[a](#a) [b](#b)\n\ntext\n\n[c](#c)\n");
+        v.focus_next_link(true);
+        assert_eq!(v.link_focus, Some((0, 0)));
+        v.focus_next_link(true);
+        assert_eq!(v.link_focus, Some((0, 1)));
+        v.focus_next_link(true);
+        assert_eq!(v.link_focus, Some((2, 0)));
+        v.focus_next_link(true);
+        assert_eq!(v.link_focus, Some((0, 0)), "wraps to the start");
+        v.focus_next_link(false);
+        assert_eq!(v.link_focus, Some((2, 0)), "wraps to the end");
+        assert_eq!(v.focused_link_range(2), Some((0, 1)));
+        assert_eq!(v.focused_link_range(1), None);
+        v.clear_link_focus();
+        assert!(v.link_focus.is_none());
+    }
+
+    #[test]
+    fn a_document_without_links_ignores_tab() {
+        let mut v = view("plain\n");
+        v.focus_next_link(true);
+        v.activate_focused_link();
+        assert!(v.link_focus.is_none());
+    }
+
+    #[test]
+    fn m_cycles_appearance_and_forced_colours_ignore_theme_changes() {
+        let mut v = view("x");
+        v.set_appearance(Appearance::Dark);
+        v.theme_changed();
+        assert_eq!(v.theme, theme::DARK);
+        v.toggle_theme();
+        assert_eq!(v.theme, theme::LIGHT);
+        v.toggle_theme();
+        assert_eq!(v.appearance, Appearance::Follow);
+        v.toggle_theme();
+        assert_eq!(v.theme, theme::DARK);
+    }
+
+    #[test]
+    fn an_unknown_font_family_changes_nothing() {
+        let mut v = view("x");
+        assert!(!v.fonts.set_mono("No Such Font At All"));
+        assert_eq!(v.fonts.mono, crate::fonts::MONO);
+        assert!(!v.fonts.set_mono("JetBrainsMono Nerd Font"), "already the embedded design");
     }
 
     #[test]

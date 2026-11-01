@@ -1,6 +1,6 @@
 # markdonk
 
-A memory-efficient native Markdown viewer for Linux. It ships as one binary with
+A memory-efficient native Markdown viewer and editor for Linux. It ships as one binary with
 its fonts inside, and draws everything itself on the CPU, with no webview or GPU
 context.
 
@@ -18,6 +18,7 @@ Rerun it after rebuilding to update the installed copy.
 ```sh
 install -Dm755 target/release/markdonk ~/.local/bin/markdonk
 install -Dm644 assets/markdonk.desktop ~/.local/share/applications/markdonk.desktop
+install -Dm644 assets/markdonk.svg ~/.local/share/icons/hicolor/scalable/apps/markdonk.svg
 update-desktop-database ~/.local/share/applications
 xdg-mime default markdonk.desktop text/markdown text/x-markdown
 ```
@@ -40,7 +41,8 @@ xdg-mime default markdonk.desktop text/markdown text/x-markdown
 | `j` `k`, arrows | Scroll | `/`, `Ctrl+F` | Search |
 | `Space`, `b` | Page down, up | `n`, `N` | Next, previous match |
 | `d`, `u` | Half page | `t` | Table of contents |
-| `g`, `G` | Top, bottom | `m` | Light or dark theme |
+| `g`, `G` | Top, bottom | `m` | System, dark or light theme |
+| `o` | Browse for a file | `Tab`, `Enter` | Move between links, open one |
 | `Ctrl` `+` `-` `0` | Zoom | `r` | Reload |
 | `Ctrl+C`, `Ctrl+A` | Copy, select all | `Backspace` | Previous file |
 | `q` | Quit | `Esc` | Close search, clear selection |
@@ -60,12 +62,32 @@ the block you left.
 Saves replace the file atomically. A list or table is one block, so it opens whole. If the
 file changes on disk while you have unsaved edits, the next save warns before overwriting.
 
+## Omarchy
+
+markdonk fits in with no setup, and falls back to its own defaults elsewhere:
+
+- **Theme:** colours come from the active Omarchy theme and update live when it changes.
+  `--dark` and `--light` opt out, and `m` switches between system, dark and light.
+- **Font:** code and the editing block use the system monospace font, from `omarchy font set`
+  or any fontconfig setup.
+
+A see-through background keeps text fully solid. Add this to `~/.config/markdonk/config`, or
+pass `--background-opacity`:
+
+```
+background-opacity = 0.9
+```
+
+A Hyprland rule sets touchpad speed, the same way Omarchy tunes Ghostty:
+
+```lua
+o.window("markdonk", { scroll_touchpad = 1 })
+```
+
 ## Scrolling
 
-Touchpad scrolling is scaled up by 2.5 to undo Omarchy's `scroll_factor = 0.4`, so
-content follows your fingers there, and it coasts after a flick. On a setup with a
-different factor, or to taste, use `--scroll-speed N` to multiply wheel and touchpad
-scrolling.
+Touchpad scrolling coasts after a flick. Hyprland's touchpad `scroll_factor` applies, and
+`--scroll-speed N` multiplies wheel and touchpad scrolling.
 
 ## Limits
 
@@ -75,6 +97,7 @@ scrolling.
 - No math or Mermaid diagrams, and no screen reader support.
 - Links open only for `http`, `https`, `mailto` and Markdown files.
 - Long code lines wrap, as there is no horizontal scrolling.
+- See-through backgrounds need Wayland; on X11 the window stays opaque.
 
 ## How memory stays low
 

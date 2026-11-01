@@ -4,15 +4,17 @@ mod draw;
 mod fonts;
 mod highlight;
 mod images;
+mod pages;
+mod surface;
+mod theme;
 mod view;
 mod watch;
 
-use softbuffer::{Context, Surface};
 use std::io::{IsTerminal, Read};
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
-use view::{Cursor, View};
+use surface::Surface;
+use view::{Appearance, Cursor, View};
 use watch::Watcher;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -20,7 +22,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchP
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::wayland::WindowAttributesExtWayland;
-use winit::window::{CursorIcon, Theme, Window, WindowId};
+use winit::window::{CursorIcon, Theme as WindowTheme, Window, WindowId};
 
 const USAGE: &str = "\
 markdonk - a memory-efficient Markdown viewer
@@ -32,6 +34,7 @@ Options:
   --light         Start with the light theme
   --dark          Start with the dark theme
   --scroll-speed N  Multiply wheel and touchpad scrolling (default 1)
+  --background-opacity N  See-through window background, 0 to 1 (default 1)
   --licenses      Print the licenses of the embedded fonts
   -h, --help      Show this help
   -V, --version   Show the version
@@ -40,11 +43,13 @@ Keys:
   j k, arrows     Scroll              /  Ctrl+F    Search
   Space, b        Page down, up       n  N         Next, previous match
   d u             Half page           t            Table of contents
-  g G             Top, bottom         m            Light or dark theme
+  g G             Top, bottom         m            System, dark or light theme
   Ctrl + - 0      Zoom                r            Reload
   Ctrl+C Ctrl+A   Copy, select all    Backspace    Back to previous file
   q               Quit                Esc          Close search, clear selection
   e               Edit in place: Ctrl+S saves, Esc finishes, Ctrl+Z undoes
+  o               Browse for a file
+  Tab, Enter      Move between links, open the focused one
 ";
 
 const LICENSES: &str = concat!(
@@ -54,16 +59,18 @@ const LICENSES: &str = concat!(
     include_str!("../assets/fonts/LICENSE-JetBrainsMono.txt"),
 );
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum Wake {
     Reload,
     Redraw,
+    Theme,
+    FontFile,
+    Font(String),
 }
 
 struct Win {
     window: Arc<Window>,
-    surface: Surface<Arc<Window>, Arc<Window>>,
-    _context: Context<Arc<Window>>,
+    surface: Surface,
 }
 
 struct App {
@@ -76,6 +83,10 @@ struct App {
     title: String,
     theme_forced: bool,
     cursor: Cursor,
+    transparent: bool,
+    proxy: EventLoopProxy<Wake>,
+    // Held so their threads keep watching for Omarchy theme and font changes.
+    _desktop_watchers: Vec<Watcher>,
 }
 
 impl App {
@@ -153,6 +164,9 @@ impl App {
             },
             Key::Character("q") => event_loop.exit(),
             Key::Character("e") => v.enter_edit(),
+            Key::Character("o") => v.open_browser(),
+            Key::Named(NamedKey::Tab) => v.focus_next_link(!shift),
+            Key::Named(NamedKey::Enter) => v.activate_focused_link(),
             Key::Character("j") => v.scroll_lines(1.0),
             Key::Character("k") => v.scroll_lines(-1.0),
             Key::Character("d") => v.scroll_pages(0.5),
@@ -183,6 +197,7 @@ impl App {
                     v.close_search();
                 } else {
                     v.clear_selection();
+                    v.clear_link_focus();
                 }
             }
             _ => {}
@@ -246,14 +261,10 @@ impl App {
     fn paint(&mut self) {
         let Some(win) = &mut self.win else { return };
         let size = win.window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
-        if win.surface.resize(w, h).is_err() {
-            return;
-        }
-        let Ok(mut buffer) = win.surface.buffer_mut() else { return };
-        self.view.draw(&mut buffer, w.get() as i32, h.get() as i32);
-        win.window.pre_present_notify();
-        if let Err(err) = buffer.present() {
+        let view = &mut self.view;
+        let (w, h) = (size.width, size.height);
+        let painted = win.surface.present(&win.window, w, h, |px| view.draw(px, w as i32, h as i32));
+        if let Err(err) = painted {
             eprintln!("markdonk: present failed: {err}");
         }
     }
@@ -267,6 +278,7 @@ impl ApplicationHandler<Wake> for App {
         let attrs = Window::default_attributes()
             .with_title(self.view.title())
             .with_inner_size(LogicalSize::new(1000.0, 800.0))
+            .with_transparent(self.transparent)
             .with_name("markdonk", "markdonk");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -276,10 +288,8 @@ impl ApplicationHandler<Wake> for App {
                 return;
             }
         };
-        let context = Context::new(window.clone());
-        let surface = context.and_then(|ctx| Ok((Surface::new(&ctx, window.clone())?, ctx)));
-        let (surface, context) = match surface {
-            Ok(pair) => pair,
+        let surface = match Surface::new(&window, self.transparent) {
+            Ok(surface) => surface,
             Err(err) => {
                 eprintln!("markdonk: cannot create a drawing surface: {err}");
                 event_loop.exit();
@@ -288,13 +298,14 @@ impl ApplicationHandler<Wake> for App {
         };
         if !self.theme_forced {
             if let Some(theme) = window.theme() {
-                self.view.dark = theme == Theme::Dark;
+                self.view.dark = theme == WindowTheme::Dark;
             }
+            self.view.set_appearance(Appearance::Follow);
         }
         let size = window.inner_size();
         self.view.resize(size.width as i32, size.height as i32, window.scale_factor() as f32);
         window.request_redraw();
-        self.win = Some(Win { window, surface, _context: context });
+        self.win = Some(Win { window, surface });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -356,6 +367,9 @@ impl ApplicationHandler<Wake> for App {
         match wake {
             Wake::Reload => self.view.reload(),
             Wake::Redraw => self.view.needs_redraw = true,
+            Wake::Theme => self.view.theme_changed(),
+            Wake::FontFile => spawn_font_query(self.proxy.clone()),
+            Wake::Font(family) => self.view.set_mono_font(&family),
         }
         self.sync_after_event(event_loop);
     }
@@ -366,10 +380,39 @@ impl ApplicationHandler<Wake> for App {
     }
 }
 
+/// Asks fontconfig, which is what `omarchy font` uses, for the monospace font.
+/// It runs on its own thread so a slow answer can't delay the first frame.
+fn spawn_font_query(proxy: EventLoopProxy<Wake>) {
+    std::thread::spawn(move || {
+        let output = std::process::Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output();
+        let family = output.ok().filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok());
+        if let Some(family) = family.as_deref().and_then(|f| f.split(',').next()).map(str::trim).filter(|f| !f.is_empty()) {
+            let _ = proxy.send_event(Wake::Font(family.to_string()));
+        }
+    });
+}
+
+fn watch_desktop(proxy: &EventLoopProxy<Wake>) -> Vec<Watcher> {
+    let mut watchers = Vec::new();
+    let mut add = |path: Option<PathBuf>, wake: fn() -> Wake| {
+        let (Some(path), proxy) = (path, proxy.clone()) else { return };
+        if let Some(mut watcher) = Watcher::new(move || {
+            let _ = proxy.send_event(wake());
+        }) {
+            watcher.set(Some(&path));
+            watchers.push(watcher);
+        }
+    };
+    add(theme::omarchy_theme_marker(), || Wake::Theme);
+    add(theme::fontconfig_file(), || Wake::FontFile);
+    watchers
+}
+
 struct Args {
     file: Option<PathBuf>,
     dark: Option<bool>,
     scroll_speed: f64,
+    opacity: Option<f32>,
     render: Option<Render>,
 }
 
@@ -384,7 +427,7 @@ struct Render {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args { file: None, dark: None, scroll_speed: 1.0, render: None };
+    let mut args = Args { file: None, dark: None, scroll_speed: 1.0, opacity: None, render: None };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         let text = arg.to_string_lossy();
@@ -412,6 +455,11 @@ fn parse_args() -> Result<Args, String> {
                     .ok()
                     .filter(|n| *n > 0.0 && n.is_finite())
                     .ok_or("--scroll-speed takes a positive number")?;
+            }
+            "--background-opacity" => {
+                let opacity = value("--background-opacity")?.parse::<f32>().ok();
+                let opacity = opacity.filter(|n| n.is_finite() && (0.0..=1.0).contains(n));
+                args.opacity = Some(opacity.ok_or("--background-opacity takes a number from 0 to 1")?);
             }
             "--render-png" => {
                 args.render = Some(Render {
@@ -476,39 +524,62 @@ fn run() -> Result<(), String> {
     // SAFETY: called once at startup before any other threads exist.
     unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
 
+    let mut start_page = false;
     let document = match &args.file {
-        Some(path) => view::load_file(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        Some(path) => {
+            let document = view::load_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            pages::remember(path);
+            document
+        }
         None => {
-            if std::io::stdin().is_terminal() {
-                return Err(format!("no file given\n\n{USAGE}"));
-            }
+            // Launchers give us an empty stdin; a terminal has nothing piped in.
             let mut bytes = Vec::new();
-            std::io::stdin().read_to_end(&mut bytes).map_err(|e| format!("stdin: {e}"))?;
+            if !std::io::stdin().is_terminal() {
+                std::io::stdin().read_to_end(&mut bytes).map_err(|e| format!("stdin: {e}"))?;
+            }
+            start_page = bytes.is_empty();
             let base = std::env::current_dir().ok();
             doc::parse(&String::from_utf8_lossy(&bytes), base.as_deref())
         }
     };
     view::trim_heap();
     let dark = args.dark.unwrap_or(true);
+    let opacity = args.opacity.or_else(theme::configured_opacity).unwrap_or(1.0);
+    let background_alpha = (opacity * 255.0).round() as u32;
+    let setup = |view: &mut View| {
+        if start_page {
+            view.show_start_page();
+        }
+        view.background_alpha = background_alpha;
+        view.scroll_speed = args.scroll_speed;
+        if args.dark.is_none() {
+            view.set_appearance(Appearance::Follow);
+        }
+    };
 
     if let Some(render) = &args.render {
         let mut view = View::new(document, args.file.clone(), dark, Arc::new(|| {}));
+        setup(&mut view);
         return render_png(&mut view, render);
     }
 
     let event_loop = EventLoop::<Wake>::with_user_event().build().map_err(|e| format!("cannot start: {e}"))?;
     let proxy: EventLoopProxy<Wake> = event_loop.create_proxy();
     let image_proxy = proxy.clone();
+    let reload_proxy = proxy.clone();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = image_proxy.send_event(Wake::Redraw);
     });
     let watcher = args.file.as_ref().and_then(|_| {
         Watcher::new(move || {
-            let _ = proxy.send_event(Wake::Reload);
+            let _ = reload_proxy.send_event(Wake::Reload);
         })
     });
+    let mut view = View::new(document, args.file.clone(), dark, wake);
+    setup(&mut view);
+    spawn_font_query(proxy.clone());
     let mut app = App {
-        view: View::new(document, args.file, dark, wake),
+        view,
         win: None,
         watcher,
         watched: None,
@@ -517,8 +588,10 @@ fn run() -> Result<(), String> {
         title: String::new(),
         theme_forced: args.dark.is_some(),
         cursor: Cursor::Default,
+        transparent: background_alpha < 255,
+        _desktop_watchers: watch_desktop(&proxy),
+        proxy,
     };
-    app.view.scroll_speed = args.scroll_speed;
     event_loop.run_app(&mut app).map_err(|e| format!("event loop: {e}"))
 }
 

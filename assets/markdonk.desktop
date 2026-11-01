@@ -1,11 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=markdonk
+Name=Markdonk
 GenericName=Markdown Viewer
-Comment=View Markdown files
+Comment=View and edit Markdown files
+Icon=markdonk
 Exec=markdonk %f
 Terminal=false
-NoDisplay=true
-Categories=Utility;Viewer;
+Categories=Utility;TextEditor;
+Keywords=markdown;md;notes;viewer;
 MimeType=text/markdown;text/x-markdown;
 StartupWMClass=markdonk

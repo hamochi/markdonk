@@ -802,6 +802,8 @@ dependencies = [
  "libc",
  "pulldown-cmark",
  "softbuffer",
+ "wayland-backend",
+ "wayland-client",
  "winit",
 ]
 
@@ -1704,7 +1706,6 @@ dependencies = [
  "bytemuck",
  "fastrand",
  "js-sys",
- "memmap2",
  "ndk",
  "objc2 0.6.5",
  "objc2-core-foundation",
@@ -1717,9 +1718,6 @@ dependencies = [
  "tiny-xlib",
  "tracing",
  "wasm-bindgen",
- "wayland-backend",
- "wayland-client",
- "wayland-sys",
  "web-sys",
  "windows-sys 0.61.2",
  "x11rb",

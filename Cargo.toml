@@ -11,7 +11,9 @@ cosmic-text = { version = "0.19.0", default-features = false, features = ["std",
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 libc = "0.2.191"
 pulldown-cmark = { version = "0.13.6", default-features = false }
-softbuffer = { version = "0.4.8", default-features = false, features = ["wayland", "wayland-dlopen", "x11", "x11-dlopen"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen"] }
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 
 [profile.release]

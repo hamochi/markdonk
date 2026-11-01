@@ -32,9 +32,6 @@ is ignored.
 Without the `mimetype` command (from `perl-file-mimeinfo` on Arch), `xdg-open` falls back to
 `file`, which reports `.md` as `text/plain`. `gio open` detects `text/markdown` correctly.
 
-`softbuffer` always outputs opaque `Xrgb8888`, so a compositor opacity rule also fades the text,
-and compositor effects that rely on a client's transparent pixels can't show through.
-
 ## Layout
 
 | File | Role |
@@ -44,7 +41,10 @@ and compositor effects that rely on a client's transparent pixels can't show thr
 | `src/view.rs` | Lazy layout, scrolling, hit testing, selection, search, navigation |
 | `src/view/edit.rs` | Inline editing: caret, undo, saving, disk conflicts |
 | `src/draw.rs` | Themes and painting a frame |
-| `src/canvas.rs` | Shape and blit primitives on the window's `0x00RRGGBB` buffer |
+| `src/canvas.rs` | Shape and blit primitives on the window's premultiplied ARGB buffer |
+| `src/theme.rs` | Built-in colours, Omarchy `colors.toml`, small config files |
+| `src/surface.rs` | Window buffers: own `wl_shm` on Wayland, `softbuffer` elsewhere |
+| `src/pages.rs` | Start page, file browser and recent files, as generated Markdown |
 | `src/fonts.rs` | Embedded fonts, lazy system fonts, bounded glyph cache |
 | `src/highlight.rs` | Table-driven syntax highlighter |
 | `src/images.rs` | Worker-thread decoding, bounded pixel cache |
@@ -64,6 +64,12 @@ and compositor effects that rely on a client's transparent pixels can't show thr
   (`pack_meta`), so switching theme needs no re-layout.
 - **No `tiny-skia`:** drawing directly into the window buffer avoids a second full-window
   buffer. `canvas.rs` exists for this reason.
+- **Own Wayland buffers:** `softbuffer` is always opaque there, so `surface.rs` makes its own
+  for see-through backgrounds. Opaque windows still use `Xrgb8888`, which skips blending.
+- **Omarchy with fallbacks:** theme and font follow the desktop by reading `colors.toml` and
+  asking `fc-match`, off the main thread. Every integration must still work without Omarchy.
+- **Built-in pages are Markdown:** they reuse rendering and links. `markdonk:browse/` links only
+  work on those pages, so a document can't drive the browser.
 - **Bounded caches:** glyphs are capped at 8 MB and decoded images at 64 MB.
 - **System fonts:** scanned only when a document needs a character neither embedded font has.
   Text they already cover must not trigger the scan; a test checks this.
@@ -88,8 +94,8 @@ and compositor effects that rely on a client's transparent pixels can't show thr
 
 ## Scrolling
 
-- Touchpad deltas are multiplied by `TOUCHPAD_GAIN` (2.5) to undo Omarchy's
-  `scroll_factor = 0.4`. `--scroll-speed` multiplies wheel and touchpad input.
+- Touchpad deltas pass through unscaled; speed is the compositor's job (`scroll_touchpad` rule on
+  Hyprland). `--scroll-speed` multiplies wheel and touchpad input.
 - Momentum starts from `touch_ended`, driven by `winit`'s `TouchPhase::Ended`.
 - Don't reset `last_tick` while an animation is running. That starves the next frame's step
   and made scrolling feel slow; a regression test covers it.
@@ -124,7 +130,7 @@ In a 3840x2320 window, after the first version was built. Re-measure if a change
 - Clipboard copy, X11, and link clicks, drag selection and back navigation in a real window.
   Their logic has unit tests, but no one has confirmed them by hand.
 - In the editor: mouse placement, paste and cut, and typing dead keys such as `` ` `` and `~`.
-- Momentum settings (`FLING_FRICTION`, `TOUCHPAD_GAIN`) are tuned by judgement, not measured.
+- `FLING_FRICTION` is tuned by judgement, not measured.
 
 ## Embedded fonts
 

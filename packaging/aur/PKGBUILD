@@ -1,0 +1,41 @@
+pkgname=markdonk-git
+pkgver=r0.0000000
+pkgrel=1
+pkgdesc="A memory-efficient native Markdown viewer and editor"
+arch=('x86_64')
+url="https://github.com/hamochi/markdonk"
+license=('MIT' 'OFL-1.1')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland')
+optdepends=('fontconfig: follow the system monospace font'
+            'xdg-utils: open links in a browser')
+makedepends=('cargo' 'git')
+provides=('markdonk')
+conflicts=('markdonk')
+options=('!lto')
+source=("markdonk::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd markdonk
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd markdonk
+  cargo build --release --locked
+}
+
+check() {
+  cd markdonk
+  cargo test --release --locked
+}
+
+package() {
+  cd markdonk
+  install -Dm755 target/release/markdonk "$pkgdir/usr/bin/markdonk"
+  install -Dm644 assets/markdonk.desktop "$pkgdir/usr/share/applications/markdonk.desktop"
+  install -Dm644 assets/markdonk.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/markdonk.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 assets/fonts/LICENSE-Inter.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE-Inter.txt"
+  install -Dm644 assets/fonts/LICENSE-JetBrainsMono.txt "$pkgdir/usr/share/licenses/$pkgname/LICENSE-JetBrainsMono.txt"
+}

@@ -39,6 +39,8 @@ pub struct Fonts {
     glyph_bytes: usize,
     system_loaded: bool,
     embedded: [Arc<Font>; 2],
+    /// Family used for code and the raw editing block.
+    pub mono: &'static str,
 }
 
 impl Fonts {
@@ -64,6 +66,7 @@ impl Fonts {
             glyph_bytes: 0,
             system_loaded: false,
             embedded,
+            mono: MONO,
         }
     }
 
@@ -75,7 +78,13 @@ impl Fonts {
         let missing = text.chars().any(|c| {
             !c.is_control() && self.embedded.iter().all(|f| f.as_swash().charmap().map(c) == 0)
         });
-        if !missing {
+        if missing {
+            self.load_system_fonts();
+        }
+    }
+
+    fn load_system_fonts(&mut self) {
+        if self.system_loaded {
             return;
         }
         self.system_loaded = true;
@@ -84,6 +93,30 @@ impl Fonts {
         let (locale, mut db) = fs.into_locale_and_db();
         db.load_system_fonts();
         self.fs = FontSystem::new_with_locale_and_db(locale, db);
+    }
+
+    /// Follows the system monospace font. Returns whether the family changed.
+    /// JetBrains Mono variants map to the embedded copy, so that common case
+    /// never scans system fonts; icon glyphs still fall back when they're needed.
+    pub fn set_mono(&mut self, family: &str) -> bool {
+        let squashed: String = family.chars().filter(|c| !c.is_whitespace()).collect();
+        let wanted: &'static str = if squashed.to_ascii_lowercase().starts_with("jetbrainsmono") {
+            MONO
+        } else {
+            self.load_system_fonts();
+            let known = self.fs.db().faces().any(|f| f.families.iter().any(|(name, _)| name == family));
+            if !known {
+                return false;
+            }
+            if family == self.mono {
+                return false;
+            }
+            // A handful of bytes, once per font change.
+            String::leak(family.to_string())
+        };
+        let changed = wanted != self.mono;
+        self.mono = wanted;
+        changed
     }
 
     /// Rasterises through a byte-bounded cache that resets when full.

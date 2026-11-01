@@ -104,7 +104,7 @@ impl View {
 
     pub fn enter_edit(&mut self) {
         let Some(path) = self.path.clone() else {
-            self.set_status("Text from stdin can't be edited");
+            self.set_status("Open a file to edit it");
             return;
         };
         let bytes = match std::fs::read(&path) {

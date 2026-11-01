@@ -5,83 +5,8 @@ use crate::doc::{ALERT, CODE, Kind, LINK, Marker, STRIKE};
 use crate::fonts::Fonts;
 use crate::highlight;
 use crate::view::{Part, RULE_H_PX, SIDEBAR, TOC_ROW, View, gap, image_size, meta_style, plain_buffer, token_style};
+use crate::theme::Theme;
 use cosmic_text::Buffer;
-
-#[derive(Clone, Copy)]
-pub struct Theme {
-    bg: u32,
-    text: u32,
-    muted: u32,
-    heading: u32,
-    link: u32,
-    border: u32,
-    code_bg: u32,
-    inline_bg: u32,
-    inline_fg: u32,
-    row_alt: u32,
-    head_bg: u32,
-    quote_bar: u32,
-    select: u32,
-    match_all: u32,
-    match_now: u32,
-    side_bg: u32,
-    side_now: u32,
-    bar: u32,
-    pill_bg: u32,
-    pill_fg: u32,
-    alert: u32,
-    tokens: [u32; 7],
-}
-
-const DARK: Theme = Theme {
-    bg: 0x0f1216,
-    text: 0xd5dae1,
-    muted: 0x8b95a3,
-    heading: 0xf1f4f8,
-    link: 0x6cb0ff,
-    border: 0x2c333c,
-    code_bg: 0x181c22,
-    inline_bg: 0x242a32,
-    inline_fg: 0xe3e7ec,
-    row_alt: 0x151920,
-    head_bg: 0x1a1f26,
-    quote_bar: 0x3a434e,
-    select: 0x3f7fd0,
-    match_all: 0xc99a2e,
-    match_now: 0xf08a24,
-    side_bg: 0x14181d,
-    side_now: 0x222a33,
-    bar: 0x4a5461,
-    pill_bg: 0x262c34,
-    pill_fg: 0xe3e7ec,
-    alert: 0x6cb0ff,
-    tokens: [0xd5dae1, 0x7a8594, 0x9fd28a, 0xe5b567, 0xf08fa0, 0x74cfd9, 0x8fb8ff],
-};
-
-const LIGHT: Theme = Theme {
-    bg: 0xffffff,
-    text: 0x24292f,
-    muted: 0x626b76,
-    heading: 0x11151a,
-    link: 0x0a63d1,
-    border: 0xd5dae0,
-    code_bg: 0xf5f6f8,
-    inline_bg: 0xeceef1,
-    inline_fg: 0x24292f,
-    row_alt: 0xf7f8fa,
-    head_bg: 0xf0f2f4,
-    quote_bar: 0xcdd3da,
-    select: 0x4b93ee,
-    match_all: 0xf4d65c,
-    match_now: 0xf59a33,
-    side_bg: 0xf5f6f8,
-    side_now: 0xe3e8ee,
-    bar: 0xa8b0ba,
-    pill_bg: 0x2c333c,
-    pill_fg: 0xf5f6f8,
-    alert: 0x0a63d1,
-    tokens: [0x24292f, 0x6a737d, 0x1a7f37, 0x9a6700, 0xcf222e, 0x0b7285, 0x6639ba],
-};
 
 fn glyph_color(t: &Theme, base: u32, style: u16) -> u32 {
     let token = token_style(style) as usize;
@@ -209,9 +134,9 @@ impl View {
         self.tick();
         self.prepare();
         self.tick_timers();
-        let t = if self.dark { DARK } else { LIGHT };
+        let t = self.theme;
         let mut c = Canvas::new(px, w, h);
-        c.clear(t.bg);
+        c.clear(t.bg, self.background_alpha);
 
         if self.doc.blocks.is_empty() {
             let s = self.s;
@@ -260,7 +185,10 @@ impl View {
 
     fn draw_block(&mut self, c: &mut Canvas, t: &Theme, i: usize) {
         let s = self.s;
-        let tints = self.tints_for(i as u32, t);
+        let mut tints = self.tints_for(i as u32, t);
+        if let Some((start, end)) = self.focused_link_range(i as u32) {
+            tints.push(Tint { start, end, color: t.link, alpha: 90 });
+        }
         let (bx, cw, gap_px, top_f, height) = {
             let b = &self.doc.blocks[i];
             let gap_px = gap(&self.doc.blocks, i) * s;
@@ -296,11 +224,15 @@ impl View {
                 c.set_clip(x, y, x + cw_i, y + content_h);
                 let extend_top = if first { 0 } else { 2 * radius };
                 let extend_bot = if last { 0 } else { 2 * radius };
+                c.set_fill_alpha(self.background_alpha);
                 c.rrect(x, y - extend_top, cw_i, content_h + extend_top + extend_bot, radius, t.code_bg);
+                c.set_fill_alpha(255);
                 c.reset_clip();
             }
             Kind::Source => {
+                c.set_fill_alpha(self.background_alpha);
                 c.rrect(x, y, cw_i, content_h, radius, t.code_bg);
+                c.set_fill_alpha(255);
                 c.set_clip(x, y, x + cw_i, y + content_h);
                 c.rect(x, y, (3.0 * s).round() as i32, content_h, t.link);
                 c.reset_clip();
@@ -321,7 +253,9 @@ impl View {
                     None
                 };
                 if let Some(fill) = fill {
+                    c.set_fill_alpha(self.background_alpha);
                     c.rect(x, y, tw, content_h, fill);
+                    c.set_fill_alpha(255);
                 }
                 c.rect(x, y, tw, line, t.border);
                 if row + 1 == rows {
@@ -459,7 +393,9 @@ impl View {
         let current = self.current_toc();
         let ws = self.win_scale();
         let width = (SIDEBAR * ws) as i32;
+        c.set_fill_alpha(self.background_alpha);
         c.rect(0, 0, width, self.h, t.side_bg);
+        c.set_fill_alpha(255);
         c.rect(width - ws.round().max(1.0) as i32, 0, ws.round().max(1.0) as i32, self.h, t.border);
         c.set_clip(0, 0, width - (8.0 * ws) as i32, self.h);
         let row = TOC_ROW * ws;
