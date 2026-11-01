@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/markdonk.svg" width="128" alt="The markdonk donkey"></p>
+
 # markdonk
 
 A memory-efficient native Markdown viewer and editor for Linux. It ships as one binary with

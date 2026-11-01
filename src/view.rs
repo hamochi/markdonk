@@ -219,7 +219,10 @@ fn rich_buffer(fonts: &mut Fonts, r: Rich) -> (Buffer, Box<[u32]>) {
     buf.set_wrap(Wrap::WordOrGlyph);
     buf.set_tab_width(4);
     buf.set_size(r.width, None);
-    buf.set_rich_text(pieces, &default, Shaping::Advanced, r.align);
+    // cosmic-text skips spans equal to the defaults, and then its ASCII fast path shapes
+    // a word like "bold," in one font. Distinct defaults make every piece an explicit span.
+    let unmatched = default.clone().metadata(usize::MAX);
+    buf.set_rich_text(pieces, &unmatched, Shaping::Advanced, r.align);
     buf.shape_until_scroll(&mut fonts.fs, false);
     let mut starts = vec![0u32];
     for (i, b) in r.text.bytes().enumerate() {
@@ -2085,6 +2088,9 @@ mod tests {
         assert_eq!(meta_style(comma.metadata), 0);
         let d = run.glyphs.iter().find(|g| g.start == 3).unwrap();
         assert_eq!(d.font_weight, Weight::BOLD);
+        let plain = run.glyphs.iter().find(|g| g.start == 6).unwrap();
+        assert_eq!(comma.font_id, plain.font_id, "the comma must use the regular font file");
+        assert_ne!(d.font_id, plain.font_id);
     }
 
     #[test]
